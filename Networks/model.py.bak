@@ -1,0 +1,230 @@
+from Dataset.dataLoader import *
+from Dataset.makeGraph import *
+from Networks.Architectures.UNet_test import *
+
+import numpy as np
+np.random.seed(2885)
+import os
+import copy
+
+import torch
+torch.manual_seed(2885)
+from torch.utils.data import DataLoader
+from torch.utils.data import random_split
+import torch.nn as nn
+import torch.optim as optim
+
+from torchmetrics.detection import IntersectionOverUnion
+from torchmetrics.classification import Accuracy
+
+# --------------------------------------------------------------------------------
+# CREATE A FOLDER IF IT DOES NOT EXIST
+# INPUT: 
+#     - desiredPath (str): path to the folder to create
+# --------------------------------------------------------------------------------
+def createFolder(desiredPath): 
+    if not os.path.exists(desiredPath):
+        os.makedirs(desiredPath)
+
+
+######################################################################################
+#
+# CLASS DESCRIBING THE INSTANTIATION, TRAINING AND EVALUATION OF THE MODEL 
+# An instance of Network_Class has been created in the main.py file
+# 
+######################################################################################
+
+class Network_Class: 
+    # --------------------------------------------------------------------------------
+    # INITIALISATION OF THE MODEL
+    # INPUTS: 
+    #     - param (dic): dictionnary containing the parameters defined in the 
+    #                    configuration (yaml) file
+    #     - imgDirectory (str): path to the folder containing the images 
+    #     - maskDirectory (str): path to the folder containing the masks
+    #     - resultsPath (str): path to the folder containing the results of the 
+    #                          experiement
+    # --------------------------------------------------------------------------------
+    def __init__(self, param, imgDirectory, maskDirectory, resultsPath):
+        # ----------------
+        # USEFUL VARIABLES 
+        # ----------------
+        self.imgDirectory  = imgDirectory
+        self.maskDirectory = maskDirectory
+        self.resultsPath   = resultsPath
+        self.epoch         = param["TRAINING"]["EPOCH"]
+        self.device        = param["TRAINING"]["DEVICE"]
+        self.lr            = param["TRAINING"]["LEARNING_RATE"]
+        self.batchSize     = param["TRAINING"]["BATCH_SIZE"]
+
+
+        # -----------------------------------
+        # NETWORK ARCHITECTURE INITIALISATION
+        # -----------------------------------
+        self.model = UNet(param).to(self.device) #initialisation of the class inside basicNetwork.py
+
+        # -------------------
+        # TRAINING PARAMETERS
+        # -------------------
+        self.criterion = nn.BCEWithLogitsLoss()
+        self.optimizer = optim.Adam(self.model.parameters(), lr=self.lr)
+
+        # ----------------------------------------------------
+        # DATASET INITIALISATION (from the dataLoader.py file)
+        # ----------------------------------------------------
+        self.dataSetTrain    = OxfordPetDataset(imgDirectory, maskDirectory, "train", param)
+        self.dataSetVal      = OxfordPetDataset(imgDirectory, maskDirectory, "val",   param)
+        self.dataSetTest     = OxfordPetDataset(imgDirectory, maskDirectory, "test",  param)
+        self.trainDataLoader = DataLoader(self.dataSetTrain, batch_size=self.batchSize, shuffle=True,  num_workers=4)
+        self.valDataLoader   = DataLoader(self.dataSetVal,   batch_size=self.batchSize, shuffle=False, num_workers=4)
+        self.testDataLoader  = DataLoader(self.dataSetTest,  batch_size=self.batchSize, shuffle=False, num_workers=4)
+
+
+    # ---------------------------------------------------------------------------
+    # LOAD PRETRAINED WEIGHTS (to run evaluation without retraining the model...)
+    # ---------------------------------------------------------------------------
+    def loadWeights(self): 
+        self.model.load_state_dict(torch.load(self.resultsPath + '/_Weights/wghts.pkl'))
+
+    # -----------------------------------
+    # TRAINING LOOP (fool implementation)
+    # -----------------------------------
+    def train(self): 
+        # train for a given number of epochs
+        losses = []
+        mean_losses = []
+        validation_losses = []
+        mean_validation_loss = []
+        for i in range(self.epoch):
+            self.model.train()
+            modelWts = copy.deepcopy(self.model.state_dict())
+            for j, data in enumerate(self.trainDataLoader):
+                # Every data instance is an input + label pair
+
+                image, mask, image_resized = data
+                image, mask = image.to(self.device), mask.to(self.device)
+                # Zero your gradients for every batch!
+                self.optimizer.zero_grad()
+                
+                # Make predictions for this batch
+                prediction = self.model(image)
+
+                #print("mask len: ",len(mask))
+                #print(type(mask))
+                #print("prediction len: ",len(prediction))
+                #print(type(prediction))
+                mask = torch.unsqueeze(mask, 1) # use this so our tensor has the shape [16, 64, 64] #last error we had
+                #print(mask)
+                #print(prediction)
+                
+                # Compute the loss and its gradients
+                loss = self.criterion(prediction, mask)
+                loss.backward()
+                
+                # Adjust learning weights
+                self.optimizer.step()
+                #print(j, data)
+                #print(len(data))
+                if j % 50 == 0:
+                    print(f"epoch = {i}/{self.epoch-1}, iter = {j}/{len(self.trainDataLoader)}, loss = {loss}")
+                
+                losses.append(loss.item())
+            
+            mean_losses.append(np.mean(losses))
+            losses.clear()
+        
+            self.model.eval()
+            with torch.no_grad():
+                for k, data in enumerate(self.valDataLoader):
+                    image, mask, image_resized = data
+                    image, mask = image.to(self.device), mask.to(self.device)
+                    mask = torch.unsqueeze(mask, 1)
+                    vprediction = self.model(image).to(self.device)
+                    validation_loss = self.criterion(vprediction, mask)
+                    validation_losses.append(validation_loss.item())
+                    if k % 30 == 0:
+                        print(f"epoch = {i}/{self.epoch-1}, iter = {k}/{len(self.valDataLoader)}, validation_loss = {validation_loss}")
+                mean_validation_loss.append(np.mean(validation_losses))
+                validation_losses.clear()
+
+
+            
+        # Print learning curves
+        # Implement this...
+        print(f"mean training loss of each epoch is: {mean_losses}")
+        print(f"mean validation loss of each epoch is: {mean_validation_loss}")
+        plt.figure(figsize=(10,5))
+        plt.title("Learning Curve")
+        x = [i for i in range(1, self.epoch+1)]
+        plt.plot(x, [i for i in mean_losses],label="T", marker=".")
+        plt.plot(x, [i for i in mean_validation_loss],label="V", marker=".")
+        plt.xticks([i for i in range(0, self.epoch, 5)])
+        plt.xlabel("Epochs")
+        plt.ylabel("Loss")
+        plt.legend()
+        #plt.savefig("learning_curve.svg", format="svg")
+        #plt.show()
+            
+        # Save the model weights
+        wghtsPath  = self.resultsPath + '/_Weights/'
+        createFolder(wghtsPath)
+        torch.save(modelWts, wghtsPath + '/wghts.pkl')
+
+
+
+    # -------------------------------------------------
+    # EVALUATION PROCEDURE (ultra basic implementation)
+    # -------------------------------------------------
+    def evaluate(self):
+        self.model.train(False)
+        self.model.eval()
+        
+        # Qualitative Evaluation
+         
+        allInputs, allPreds, allGT = [], [], []
+        with torch.no_grad(): 
+            for (images, GT, resizedImg) in self.testDataLoader:
+                images      = images.to(self.device)
+                predictions = self.model(images)
+                #print(len(predictions))
+                #GT = torch.unsqueeze(GT, 1)
+
+                images, predictions = images.to('cpu'), predictions.to('cpu')
+                #print(len(images))
+                #print(len(GT))
+                #print(len(predictions))
+                #print(pred)
+                allInputs.extend(resizedImg.data.numpy())
+                allPreds.extend(predictions.data.numpy())
+                allGT.extend(GT.data.numpy())
+
+            allInputs = np.array(allInputs)
+            allPreds  = np.array(allPreds)
+            allGT     = np.array(allGT)
+            
+            
+            print(allPreds[0])
+
+
+            showPredictions(allInputs, allPreds, allGT, self.resultsPath)
+
+            # Quantitative Evaluation
+            # Implement this ! 
+            print(allPreds[1])
+        """
+        
+        predictions = self.model.sigmoid(predictions)
+                for pred in predictions:
+                    #print(pred)
+                    #print('len of pred',len(pred))
+                    #print(len(pred[0]))
+                    #print(len(pred[0][0]))
+                    for i in pred[0]:
+                        for j, pixel in enumerate(i):
+                            if pixel <= 0.5:
+                                i[j] = 0
+                            else:
+                                i[j] = 1
+        """
+
+
