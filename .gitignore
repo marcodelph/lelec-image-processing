@@ -1,5 +1,5 @@
 # Byte-compiled / optimized / DLL files
-Results/*
+Results/DefaultExp/_Weights/wghts.pkl
 
 __pycache__/
 *.py[codz]
