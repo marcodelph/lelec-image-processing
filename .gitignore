@@ -1,10 +1,13 @@
 # Byte-compiled / optimized / DLL files
+Results/*
+
 __pycache__/
 *.py[codz]
 *$py.class
 
 # C extensions
 *.so
+
 
 # Distribution / packaging
 .Python
